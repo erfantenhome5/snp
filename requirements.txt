@@ -1,0 +1,5 @@
+python-telegram-bot
+sentry-sdk
+curl_cffi
+selenium
+webdriver-manager
