@@ -172,7 +172,7 @@ def fetch_snappfood_vouchers(account_data):
     token_type = token_info.get("token_type")
 
     if not token:
-        return "\n\n⚠️ Invalid or missing token for Snappfood."
+        return "\n\n⚠ Invalid or missing token for Snappfood."
 
     try:
         with CurlSession(impersonate="chrome120") as session:
@@ -194,7 +194,7 @@ def fetch_snappfood_vouchers(account_data):
             data = response.json()
 
             vouchers = data.get("data", {}).get("vouchers", [])
-            if not vouchers: return f"\n\nℹ️ No active Snappfood vouchers found."
+            if not vouchers: return f"\n\nℹ No active Snappfood vouchers found."
             result = f"\n\n🎁 **Active Snappfood Vouchers:**\n"
             for v in vouchers:
                 title = v.get('title', 'N/A')
@@ -204,13 +204,13 @@ def fetch_snappfood_vouchers(account_data):
             return result
     except Exception as e:
         logging.error(f"Failed to fetch Snappfood vouchers: {e}")
-        return f"\n\n⚠️ Could not fetch Snappfood vouchers. Error: {e}"
+        return f"\n\n⚠ Could not fetch Snappfood vouchers. Error: {e}"
 
 def fetch_okala_vouchers(token_info):
     """Fetches Okala vouchers using a saved token."""
     access_token = token_info.get("access_token")
     if not access_token:
-        return "\n\n⚠️ Invalid or missing token for Okala."
+        return "\n\n⚠ Invalid or missing token for Okala."
 
     headers = {
         "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -224,7 +224,7 @@ def fetch_okala_vouchers(token_info):
             response.raise_for_status()
             data = response.json()
             vouchers = data.get("data", [])
-            if not vouchers: return f"\n\nℹ️ No active Okala vouchers found."
+            if not vouchers: return f"\n\nℹ No active Okala vouchers found."
             result = f"\n\n🎁 **Active Okala Vouchers:**\n"
             for v in vouchers:
                 title = v.get('title', 'N/A')
@@ -234,7 +234,7 @@ def fetch_okala_vouchers(token_info):
             return result
     except Exception as e:
         logging.error(f"Failed to fetch Okala vouchers: {e}")
-        return f"\n\n⚠️ Could not fetch Okala vouchers. Error: {e}"
+        return f"\n\n⚠ Could not fetch Okala vouchers. Error: {e}"
 
 
 # --- Tapsi Logic (Unchanged) ---
@@ -252,7 +252,7 @@ def fetch_tapsi_rewards(access_token, cookies):
         response.raise_for_status()
         rewards = response.json().get('data', {}).get('userRewards', [])
         if not rewards:
-            return "\n\nℹ️ No active Tapsi rewards found."
+            return "\n\nℹ No active Tapsi rewards found."
 
         result = "\n\n🎁 **Active Tapsi Rewards:**\n"
         for r in rewards:
@@ -260,7 +260,7 @@ def fetch_tapsi_rewards(access_token, cookies):
         return result
     except Exception as e:
         logging.error(f"Failed to fetch Tapsi rewards: {e}")
-        return f"\n\n⚠️ Could not fetch Tapsi rewards. Error: {e}"
+        return f"\n\n⚠ Could not fetch Tapsi rewards. Error: {e}"
 
 # --- Telegram Bot Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
