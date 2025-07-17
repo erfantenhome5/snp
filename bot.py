@@ -39,11 +39,36 @@ logging.basicConfig(
 SENTRY_DSN = os.environ.get("SENTRY_DSN")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
-
+BOT_PASSWORD = os.environ.get("BOT_PASSWORD") # Add a password for the bot
 
 # --- Sentry Initialization ---
 if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0)
+
+# --- User Authorization ---
+AUTHORIZED_USERS_FILE = "authorized_users.json"
+AUTHORIZED_USERS = set()
+
+def load_authorized_users():
+    """Loads the set of authorized user IDs from a file."""
+    global AUTHORIZED_USERS
+    try:
+        if os.path.exists(AUTHORIZED_USERS_FILE):
+            with open(AUTHORIZED_USERS_FILE, 'r') as f:
+                user_ids = json.load(f)
+                AUTHORIZED_USERS = set(user_ids)
+                logging.info(f"Loaded {len(AUTHORIZED_USERS)} authorized users.")
+    except Exception as e:
+        logging.error(f"Could not load authorized users file: {e}", exc_info=True)
+
+def save_authorized_users():
+    """Saves the set of authorized user IDs to a file."""
+    try:
+        with open(AUTHORIZED_USERS_FILE, 'w') as f:
+            json.dump(list(AUTHORIZED_USERS), f, indent=4)
+    except Exception as e:
+        logging.error(f"Could not save authorized users file: {e}", exc_info=True)
+
 
 # --- Global Configs & State ---
 SITE_CONFIGS = {
@@ -89,7 +114,8 @@ VALID_SERVICES = ["snappfood", "tapsi", "okala"]
     SELECTING_SERVICE_FOR_CHECK,
     SELECTING_SERVICE_FOR_DOWNLOAD,
     SELECTING_ACCOUNT_FOR_DOWNLOAD,
-) = range(8)
+    AWAITING_PASSWORD, # New state for authorization
+) = range(9)
 
 
 # --- Helper & Path Functions ---
@@ -367,22 +393,114 @@ def fetch_tapsi_rewards(access_token, cookies):
 
 # --- Telegram UI and Conversation Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Displays the main menu."""
-    keyboard = [
-        [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
-        [InlineKeyboardButton("📋 List Accounts", callback_data="list_accounts")],
-        [InlineKeyboardButton("🔄 Check Vouchers", callback_data="check_vouchers")],
-        [
-            InlineKeyboardButton(
-                "💾 Download Sessions", callback_data="download_sessions"
-            )
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "Welcome! Please choose an action:", reply_markup=reply_markup
-    )
-    return SELECTING_ACTION
+    """Acts as a gatekeeper, checking authorization before showing the main menu."""
+    chat_id = update.message.chat_id
+
+    # The admin is always authorized and is added to the set on first start
+    if ADMIN_CHAT_ID and str(chat_id) == ADMIN_CHAT_ID:
+        if chat_id not in AUTHORIZED_USERS:
+            AUTHORIZED_USERS.add(chat_id)
+            save_authorized_users()
+            logging.info(f"Admin user {chat_id} auto-authorized.")
+
+    if chat_id in AUTHORIZED_USERS:
+        keyboard = [
+            [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
+            [InlineKeyboardButton("📋 List Accounts", callback_data="list_accounts")],
+            [InlineKeyboardButton("🔄 Check Vouchers", callback_data="check_vouchers")],
+            [
+                InlineKeyboardButton(
+                    "💾 Download Sessions", callback_data="download_sessions"
+                )
+            ],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await update.message.reply_text(
+            "Welcome! Please choose an action:", reply_markup=reply_markup
+        )
+        return SELECTING_ACTION
+    else:
+        await update.message.reply_text(
+            "Welcome! This is a private bot. Please enter the password to request access."
+        )
+        return AWAITING_PASSWORD
+
+
+async def handle_password_submission(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Checks the submitted password and requests admin approval."""
+    password = update.message.text
+    user = update.message.from_user
+
+    if not BOT_PASSWORD:
+        await update.message.reply_text("Bot password is not set. Access is disabled.")
+        return ConversationHandler.END
+
+    if password == BOT_PASSWORD:
+        if not ADMIN_CHAT_ID:
+            await update.message.reply_text("Admin not configured. Access cannot be granted automatically.")
+            return ConversationHandler.END
+
+        approval_keyboard = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"approve_{user.id}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"deny_{user.id}"),
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(approval_keyboard)
+        
+        user_info = f"User: {user.full_name} (@{user.username or 'N/A'})\nID: `{user.id}`"
+        await context.bot.send_message(
+            chat_id=ADMIN_CHAT_ID,
+            text=f"New access request:\n\n{user_info}",
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text(
+            "✅ Your access request has been sent to the admin for approval. You will be notified of the decision."
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❌ Incorrect password. Please try again or type /cancel.")
+        return AWAITING_PASSWORD
+
+
+async def handle_admin_decision(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the admin's 'Approve' or 'Deny' button press for user access."""
+    query = update.callback_query
+    await query.answer()
+    
+    admin_id = str(query.from_user.id)
+    if not ADMIN_CHAT_ID or admin_id != ADMIN_CHAT_ID:
+        await context.bot.send_message(chat_id=admin_id, text="This action is reserved for the bot admin.")
+        return
+
+    try:
+        action, user_id_str = query.data.split("_", 1)
+        user_id = int(user_id_str)
+    except (ValueError, IndexError) as e:
+        logging.error(f"Could not parse admin callback query: {query.data}, error: {e}")
+        await query.edit_message_text(text=f"{query.message.text}\n\n--- ⚠️ Error processing callback. ---")
+        return
+
+    original_message = query.message.text
+    
+    if action == "approve":
+        AUTHORIZED_USERS.add(user_id)
+        save_authorized_users()
+        logging.info(f"Admin approved access for user {user_id}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="🎉 Your access has been approved! You can now use the /start command to begin."
+        )
+        await query.edit_message_text(text=f"{original_message}\n\n--- ✅ Approved by admin. ---")
+    elif action == "deny":
+        logging.info(f"Admin denied access for user {user_id}")
+        await context.bot.send_message(
+            chat_id=user_id,
+            text="😔 Your access request has been denied by the admin."
+        )
+        await query.edit_message_text(text=f"{original_message}\n\n--- ❌ Denied by admin. ---")
 
 
 async def ask_for_service(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -837,7 +955,8 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         message = "Bot users (by chat_id):\n"
         for user_id in user_dirs:
-            message += f"- `{user_id}`\n"
+            auth_status = "✅" if int(user_id) in AUTHORIZED_USERS else "⏳"
+            message += f"- `{user_id}` {auth_status}\n"
         await update.message.reply_text(message, parse_mode='Markdown')
 
     except Exception as e:
@@ -872,8 +991,12 @@ def main():
         logging.error("TELEGRAM_TOKEN environment variable not set! Exiting.")
         return
     if not ADMIN_CHAT_ID:
-        logging.warning("ADMIN_CHAT_ID environment variable not set. Admin features disabled.")
+        logging.warning("ADMIN_CHAT_ID environment variable not set. Admin approval disabled.")
+    if not BOT_PASSWORD:
+        logging.warning("BOT_PASSWORD environment variable not set. Bot is open to public.")
 
+    # Load authorized users from file on startup
+    load_authorized_users()
 
     cleanup_thread = threading.Thread(target=cleanup_old_sessions, daemon=True)
     cleanup_thread.start()
@@ -896,7 +1019,6 @@ def main():
             CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
         ],
         map_to_parent={
-            # After conversation ends, return to the main menu selection
             ConversationHandler.END: SELECTING_ACTION
         },
     )
@@ -948,15 +1070,19 @@ def main():
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
     )
 
-    # Main handler that routes button presses to the correct conversation
+    # Main handler that routes all interactions, starting with authorization check
     main_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start_command)],
         states={
+            AWAITING_PASSWORD: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_password_submission)
+            ],
             SELECTING_ACTION: [
                 add_conv_handler,
                 list_conv_handler,
                 check_conv_handler,
                 download_conv_handler,
+                CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
             ]
         },
         fallbacks=[CommandHandler("start", start_command)],
@@ -964,8 +1090,11 @@ def main():
 
     application.add_handler(main_handler)
     application.add_handler(CommandHandler("admin", admin_command))
+    # Add the handler for admin decisions on user access
+    application.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^(approve_|deny_)"))
 
-    logging.info("Bot is starting with new button interface...")
+
+    logging.info("Bot is starting with new authorization flow...")
     application.run_polling()
 
 
