@@ -152,11 +152,18 @@ def do_otp_request(phone_number, service):
                 r = s.post(config["otp_url"], json=payload)
             r.raise_for_status()
             logging.info(f"{service.capitalize()} OTP response: {r.text}")
-            return True
+            return True, None
     except Exception as e:
-        logging.error(f"{service.capitalize()} OTP request failed: {e}")
+        error_message = f"An unexpected error occurred: {e}"
+        if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+            if e.response.status_code == 404:
+                error_message = "❌ Failed to send OTP. The service endpoint was not found (404). The API might have changed."
+            else:
+                error_message = f"❌ Failed to send OTP. Received status code: {e.response.status_code}"
+        
+        logging.error(f"{service.capitalize()} OTP request failed: {error_message}")
         sentry_sdk.capture_exception(e)
-        return False
+        return False, error_message
 
 
 def do_snappfood_login(phone_number, otp_code, chat_id):
@@ -600,16 +607,14 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(
             f"Requesting OTP for {phone} on {service.capitalize()}..."
         )
-        success = do_otp_request(phone, service)
+        success, error_message = do_otp_request(phone, service)
         if success:
             await update.message.reply_text(
                 f"✅ OTP sent successfully. Please reply with the code."
             )
             return ENTERING_OTP
         else:
-            await update.message.reply_text(
-                f"❌ Failed to send OTP for {service.capitalize()}. Please try again."
-            )
+            await update.message.reply_text(error_message)
             return ConversationHandler.END
 
     elif service == "tapsi":
@@ -962,7 +967,7 @@ async def download_all_sessions(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Returns to the main menu."""
+    """Returns to the main menu by ending the current conversation."""
     query = update.callback_query
     await query.answer()
     keyboard = [
@@ -979,7 +984,8 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.edit_message_text(
         "Welcome! Please choose an action:", reply_markup=reply_markup
     )
-    return SELECTING_ACTION
+    # This will end the nested conversation and the map_to_parent will take over.
+    return ConversationHandler.END
 
 
 async def cancel_conversation(
@@ -1103,12 +1109,13 @@ def main():
             ENTERING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_otp_input)],
         },
         fallbacks=[
-            CommandHandler("cancel", cancel_conversation),
             CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
+            CommandHandler("cancel", cancel_conversation)
         ],
         map_to_parent={
             ConversationHandler.END: SELECTING_ACTION
         },
+        per_message=True,
     )
 
     # Handlers for listing accounts
@@ -1120,8 +1127,12 @@ def main():
                 CallbackQueryHandler(ask_for_service, pattern="^list_accounts_back$")
             ]
         },
-        fallbacks=[CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$")],
+        fallbacks=[
+            CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
+            CommandHandler("cancel", cancel_conversation)
+        ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
+        per_message=True,
     )
 
     # Handlers for checking vouchers
@@ -1133,8 +1144,12 @@ def main():
                 CallbackQueryHandler(ask_for_service, pattern="^check_vouchers_back$")
             ]
         },
-        fallbacks=[CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$")],
+        fallbacks=[
+            CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
+            CommandHandler("cancel", cancel_conversation)
+        ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
+        per_message=True,
     )
     
     # Handlers for downloading sessions
@@ -1154,8 +1169,12 @@ def main():
                 CallbackQueryHandler(ask_for_download_type, pattern="^back_to_dl_type$")
             ]
         },
-        fallbacks=[CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$")],
+        fallbacks=[
+            CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
+            CommandHandler("cancel", cancel_conversation)
+        ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
+        per_message=True,
     )
 
     # Main handler that routes all interactions, starting with authorization check
@@ -1170,10 +1189,10 @@ def main():
                 list_conv_handler,
                 check_conv_handler,
                 download_conv_handler,
-                CallbackQueryHandler(back_to_main_menu, pattern="^main_menu$"),
             ]
         },
         fallbacks=[CommandHandler("start", start_command)],
+        per_message=True,
     )
 
     application.add_handler(main_handler)
