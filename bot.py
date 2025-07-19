@@ -20,7 +20,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ConversationHandler,
 )
-from curl_cffi.requests import Session as CurlSession, HTTPError
+from curl_cffi.requests import Session as CurlSession
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -40,6 +40,7 @@ SENTRY_DSN = os.environ.get("SENTRY_DSN")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 BOT_PASSWORD = os.environ.get("BOT_PASSWORD") # Add a password for the bot
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Add your Gemini API Key
 
 # --- Sentry Initialization ---
 if SENTRY_DSN:
@@ -268,12 +269,14 @@ def refresh_okala_token(token_info, phone_number, chat_id):
                 json.dump(token_info, f)
 
             return token_info, "✅ Token refreshed successfully."
-    except HTTPError as e:
-        logging.error(f"Okala token refresh failed for {phone_number}: {e}")
-        return None, f"❌ Token refresh failed with status {e.response.status_code}. Please log in again."
     except Exception as e:
-        logging.error(f"Unexpected error during Okala token refresh for {phone_number}: {e}")
-        return None, f"❌ Unexpected error during refresh: {e}"
+        if hasattr(e, 'response') and hasattr(e.response, 'status_code'):
+            logging.error(f"Okala token refresh failed for {phone_number}: {e}")
+            return None, f"❌ Token refresh failed with status {e.response.status_code}. Please log in again."
+        else:
+            logging.error(f"Unexpected error during Okala token refresh for {phone_number}: {e}")
+            sentry_sdk.capture_exception(e)
+            return None, f"❌ Unexpected error during refresh: {e}"
 
 
 def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
@@ -303,8 +306,8 @@ def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
     try:
         with CurlSession(impersonate="chrome120") as s:
             return get_vouchers(s, headers)
-    except HTTPError as e:
-        if e.response.status_code == 401 and phone_number and chat_id:
+    except Exception as e:
+        if hasattr(e, 'response') and e.response.status_code == 401 and phone_number and chat_id:
             logging.info(f"Okala token expired for {phone_number}. Attempting refresh.")
             new_token_info, refresh_message = refresh_okala_token(token_info, phone_number, chat_id)
             if new_token_info:
@@ -316,13 +319,14 @@ def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
                 except Exception as retry_e:
                     return f"{refresh_message}\n\n⚠️ Failed to fetch vouchers after refresh: {retry_e}"
             else:
-                return f"\n\n{refresh_message}" # Return the error from the refresh attempt
+                return f"\n\n{refresh_message}"
+        elif hasattr(e, 'response'):
+             logging.error(f"Failed to fetch Okala vouchers: {e}")
+             return f"\n\n⚠️ Could not fetch Okala vouchers. Error: {e}"
         else:
-            logging.error(f"Failed to fetch Okala vouchers: {e}")
-            return f"\n\n⚠️ Could not fetch Okala vouchers. Error: {e}"
-    except Exception as e:
-        logging.error(f"Unexpected error fetching Okala vouchers: {e}")
-        return f"\n\n⚠️ Unexpected error fetching Okala vouchers: {e}"
+            logging.error(f"Unexpected error fetching Okala vouchers: {e}")
+            sentry_sdk.capture_exception(e)
+            return f"\n\n⚠️ Unexpected error fetching Okala vouchers: {e}"
 
 
 def fetch_snappfood_vouchers(account_data):
@@ -389,6 +393,54 @@ def fetch_tapsi_rewards(access_token, cookies):
     except Exception as e:
         logging.error(f"Failed to fetch Tapsi rewards: {e}")
         return f"\n\n⚠️ Could not fetch Tapsi rewards. Error: {e}"
+
+
+# --- Gemini API Logic ---
+def call_gemini_api(prompt: str) -> str:
+    """Calls the Gemini API with a given prompt and returns the text response."""
+    if not GEMINI_API_KEY:
+        return "❌ Gemini API key is not configured. Please set the GEMINI_API_KEY environment variable."
+
+    api_url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ]
+    }
+    
+    try:
+        with CurlSession() as session:
+            response = session.post(f"{api_url}?key={GEMINI_API_KEY}", headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            
+            # Safely extract the text from the response
+            candidates = data.get("candidates", [])
+            if candidates and "content" in candidates[0] and "parts" in candidates[0]["content"]:
+                parts = candidates[0]["content"]["parts"]
+                if parts and "text" in parts[0]:
+                    return parts[0]["text"]
+            
+            logging.warning(f"Gemini API response did not contain expected text. Full response: {data}")
+            return "❌ Received an unexpected response format from Gemini API."
+
+    except Exception as e:
+        if hasattr(e, 'response'):
+            logging.error(f"HTTP Error calling Gemini API: {e.response.status_code} - {e.response.text}")
+            return f"❌ Failed to call Gemini API. Status: {e.response.status_code}"
+        else:
+            logging.error(f"An unexpected error occurred calling Gemini API: {e}", exc_info=True)
+            sentry_sdk.capture_exception(e)
+            return f"❌ An unexpected error occurred: {e}"
 
 
 # --- Telegram UI and Conversation Handlers ---
@@ -939,9 +991,9 @@ async def cancel_conversation(
     return ConversationHandler.END
 
 
-# --- Admin Command ---
+# --- Admin Commands ---
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to see bot usage."""
+    """Admin command to see bot usage and available admin commands."""
     chat_id = str(update.message.chat_id)
     if not ADMIN_CHAT_ID or chat_id != ADMIN_CHAT_ID:
         await update.message.reply_text("You are not authorized to use this command.")
@@ -949,19 +1001,53 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         user_dirs = [d for d in os.listdir(BASE_DATA_DIR) if os.path.isdir(os.path.join(BASE_DATA_DIR, d))]
-        if not user_dirs:
-            await update.message.reply_text("No user data found yet.")
-            return
         
-        message = "Bot users (by chat_id):\n"
-        for user_id in user_dirs:
-            auth_status = "✅" if int(user_id) in AUTHORIZED_USERS else "⏳"
-            message += f"- `{user_id}` {auth_status}\n"
+        message = "--- Admin Panel ---\n\n"
+        message += "**Authorized Users:**\n"
+        if not AUTHORIZED_USERS:
+            message += "No users authorized yet.\n"
+        else:
+            for user_id in AUTHORIZED_USERS:
+                 message += f"- `{user_id}`\n"
+
+        message += "\n**Bot Data Directories:**\n"
+        if not user_dirs:
+            message += "No user data found yet.\n"
+        else:
+            for user_id in user_dirs:
+                auth_status = "✅" if int(user_id) in AUTHORIZED_USERS else "⏳"
+                message += f"- `{user_id}` {auth_status}\n"
+
+        message += "\n**Available Admin Commands:**\n"
+        message += "- `/admin`: Shows this panel.\n"
+        message += "- `/gemini [prompt]`: Query the Gemini API."
+        
         await update.message.reply_text(message, parse_mode='Markdown')
 
     except Exception as e:
         await update.message.reply_text(f"An error occurred: {e}")
         sentry_sdk.capture_exception(e)
+
+
+async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles the /gemini command for the admin."""
+    chat_id = str(update.message.chat_id)
+    if not ADMIN_CHAT_ID or chat_id != ADMIN_CHAT_ID:
+        await update.message.reply_text("You are not authorized to use this command.")
+        return
+
+    prompt = " ".join(context.args)
+    if not prompt:
+        await update.message.reply_text("Please provide a prompt. Usage: `/gemini How does AI work?`")
+        return
+
+    await update.message.reply_text("🧠 Querying Gemini API, please wait...")
+    
+    response_text = call_gemini_api(prompt)
+    
+    # Send the potentially long message in chunks
+    for i in range(0, len(response_text), 4096):
+        await update.message.reply_text(response_text[i:i + 4096])
 
 
 # --- Cleanup Thread for Tapsi Sessions (Unchanged) ---
@@ -994,6 +1080,8 @@ def main():
         logging.warning("ADMIN_CHAT_ID environment variable not set. Admin approval disabled.")
     if not BOT_PASSWORD:
         logging.warning("BOT_PASSWORD environment variable not set. Bot is open to public.")
+    if not GEMINI_API_KEY:
+        logging.warning("GEMINI_API_KEY environment variable not set. /gemini command will not work.")
 
     # Load authorized users from file on startup
     load_authorized_users()
@@ -1089,7 +1177,10 @@ def main():
     )
 
     application.add_handler(main_handler)
+    # Add admin commands
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("gemini", gemini_command))
+
     # Add the handler for admin decisions on user access
     application.add_handler(CallbackQueryHandler(handle_admin_decision, pattern="^(approve_|deny_)"))
 
