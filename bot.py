@@ -46,6 +46,13 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Add your Gemini API Key
 if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0)
 
+# --- UI Text & Buttons ---
+BTN_ADD_ACCOUNT = "➕ Add Account"
+BTN_LIST_ACCOUNTS = "📋 List Accounts"
+BTN_CHECK_VOUCHERS = "🔄 Check Vouchers"
+BTN_DOWNLOAD_SESSIONS = "💾 Download Sessions"
+BTN_BACK = "⬅️ Back"
+
 # --- User Authorization ---
 AUTHORIZED_USERS_FILE = "authorized_users.json"
 AUTHORIZED_USERS = set()
@@ -464,12 +471,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     if chat_id in AUTHORIZED_USERS:
         keyboard = [
-            [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
-            [InlineKeyboardButton("📋 List Accounts", callback_data="list_accounts")],
-            [InlineKeyboardButton("🔄 Check Vouchers", callback_data="check_vouchers")],
+            [InlineKeyboardButton(BTN_ADD_ACCOUNT, callback_data="add_account")],
+            [InlineKeyboardButton(BTN_LIST_ACCOUNTS, callback_data="list_accounts")],
+            [InlineKeyboardButton(BTN_CHECK_VOUCHERS, callback_data="check_vouchers")],
             [
                 InlineKeyboardButton(
-                    "💾 Download Sessions", callback_data="download_sessions"
+                    BTN_DOWNLOAD_SESSIONS, callback_data="download_sessions"
                 )
             ],
         ]
@@ -574,7 +581,7 @@ async def ask_for_service(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             InlineKeyboardButton("Okala", callback_data="okala"),
             InlineKeyboardButton("Tapsi", callback_data="tapsi"),
         ],
-        [InlineKeyboardButton("« Back", callback_data="main_menu")],
+        [InlineKeyboardButton(BTN_BACK, callback_data="main_menu")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
@@ -768,7 +775,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sorted(accounts)
         )
 
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="list_accounts_back")]]
+    keyboard = [[InlineKeyboardButton(BTN_BACK, callback_data="list_accounts_back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(text=message, reply_markup=reply_markup)
     return SELECTING_SERVICE
@@ -837,7 +844,7 @@ async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     # After sending the report, show the menu again
-    keyboard = [[InlineKeyboardButton("« Back", callback_data="check_vouchers_back")]]
+    keyboard = [[InlineKeyboardButton(BTN_BACK, callback_data="check_vouchers_back")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await context.bot.send_message(
         chat_id=chat_id, text="Check complete.", reply_markup=reply_markup
@@ -858,7 +865,7 @@ async def ask_for_download_type(update: Update, context: ContextTypes.DEFAULT_TY
     keyboard = [
         [InlineKeyboardButton("Download One Account", callback_data="download_one")],
         [InlineKeyboardButton("Download All (ZIP)", callback_data="download_all")],
-        [InlineKeyboardButton("« Back", callback_data="download_sessions_back")],
+        [InlineKeyboardButton(BTN_BACK, callback_data="download_sessions_back")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
@@ -898,7 +905,7 @@ async def ask_for_account_to_download(
     keyboard = [
         [InlineKeyboardButton(acc, callback_data=f"dl_{acc}")] for acc in sorted(accounts)
     ]
-    keyboard.append([InlineKeyboardButton("« Back", callback_data="back_to_dl_type")])
+    keyboard.append([InlineKeyboardButton(BTN_BACK, callback_data="back_to_dl_type")])
     reply_markup = InlineKeyboardMarkup(keyboard)
     await query.edit_message_text(
         text=f"Select account to download for {service.capitalize()}:",
@@ -971,12 +978,12 @@ async def back_to_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     keyboard = [
-        [InlineKeyboardButton("➕ Add Account", callback_data="add_account")],
-        [InlineKeyboardButton("📋 List Accounts", callback_data="list_accounts")],
-        [InlineKeyboardButton("🔄 Check Vouchers", callback_data="check_vouchers")],
+        [InlineKeyboardButton(BTN_ADD_ACCOUNT, callback_data="add_account")],
+        [InlineKeyboardButton(BTN_LIST_ACCOUNTS, callback_data="list_accounts")],
+        [InlineKeyboardButton(BTN_CHECK_VOUCHERS, callback_data="check_vouchers")],
         [
             InlineKeyboardButton(
-                "💾 Download Sessions", callback_data="download_sessions"
+                BTN_DOWNLOAD_SESSIONS, callback_data="download_sessions"
             )
         ],
     ]
@@ -1115,7 +1122,6 @@ def main():
         map_to_parent={
             ConversationHandler.END: SELECTING_ACTION
         },
-        per_message=True,
     )
 
     # Handlers for listing accounts
@@ -1132,7 +1138,6 @@ def main():
             CommandHandler("cancel", cancel_conversation)
         ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
-        per_message=True,
     )
 
     # Handlers for checking vouchers
@@ -1149,7 +1154,6 @@ def main():
             CommandHandler("cancel", cancel_conversation)
         ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
-        per_message=True,
     )
     
     # Handlers for downloading sessions
@@ -1174,7 +1178,6 @@ def main():
             CommandHandler("cancel", cancel_conversation)
         ],
         map_to_parent={ConversationHandler.END: SELECTING_ACTION},
-        per_message=True,
     )
 
     # Main handler that routes all interactions, starting with authorization check
@@ -1192,7 +1195,6 @@ def main():
             ]
         },
         fallbacks=[CommandHandler("start", start_command)],
-        per_message=True,
     )
 
     application.add_handler(main_handler)
@@ -1210,4 +1212,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
