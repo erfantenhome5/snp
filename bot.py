@@ -111,23 +111,10 @@ USER_STATE = {}
 # --- Global Configs & State ---
 SITE_CONFIGS = {
     "snappfood": {"name": "Snappfood", "otp_url": "https://snappfood.ir/mobile/v4/user/loginMobileWithNoPass", "login_url": "https://snappfood.ir/mobile/v2/user/loginMobileWithToken", "discounts_url": "https://snappfood.ir/mobile/v2/user/activeVouchers", "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
-    "okala": {
-        "name": "Okala",
-        "otp_url": "https://apigateway.okala.com/api/voyager/C/CustomerAccount/OTPRegister",
-        "login_url": "https://apigateway.okala.com/api/v1/accounts/tokens",
-        "discounts_url": "https://apigateway.okala.com/api/discount/v1/discounts/customer",
-        "headers": {
-            "Accept": "application/json, text/plain, */*",
-            "Origin": "https://www.okala.com",
-            "Referer": "https://www.okala.com/",
-            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
-            "source": "okala",
-            "ui-version": "2.0"
-        }
-    },
+    "okala": {"name": "Okala", "otp_url": "https://www.okala.com/api/v3/user/otp", "login_url": "https://www.okala.com/api/v3/user/token", "refresh_url": "https://www.okala.com/api/v3/user/token", "discounts_url": "https://www.okala.com/api/v3/user/vouchers", "headers": {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Accept": "application/json, text/plain, */*", "Origin": "https://www.okala.com", "Referer": "https://www.okala.com/"}},
     "tapsi": {"name": "Tapsi", "login_page": "https://accounts.tapsi.ir/login?client_id=tapsi.cab.passenger&redirect_uri=https%3A%2F%2Fapp.tapsi.cab&response_type=code&scope=PASSENGER&state=be452b2200ac4ce5811b2add151cb007&code_challenge=CAajCXZFhHghxOtE9aIDvj5OmzYOsAumA-MO_5DtpOM&code_challenge_method=S256&response_mode=query", "rewards_url": "https://api.tapsi.cab/api/v2/reward/userReward"},
 }
-BASE_DATA_DIR = "user_data"
+BASE_DATA_DIR = "user_data" # Still used for temporary files like zips
 active_tapsi_sessions = {}
 SESSION_TIMEOUT = timedelta(minutes=5)
 
@@ -192,21 +179,7 @@ def do_otp_request(phone_number, service):
                 payload = {"cellphone": phone_number}
                 r = s.post(config["otp_url"], params=params, data=payload)
             elif service.lower() == "okala":
-                # *** MODIFIED: Add extra headers and new payload for Okala OTP ***
-                s.headers.update({
-                    "Content-Type": "application/json",
-                    "X-Correlation-Id": str(uuid.uuid4()),
-                    "session-id": str(uuid.uuid4())
-                })
-                payload = {
-                    "mobile": phone_number,
-                    "confirmTerms": True,
-                    "notRobot": False,
-                    "ValidationCodeCreateReason": 5,
-                    "OtpApp": 0,
-                    "deviceTypeCode": 10,
-                    "IsAppOnly": False
-                }
+                payload = {"mobile": phone_number}
                 r = s.post(config["otp_url"], json=payload)
             r.raise_for_status()
             logging.info(f"{service.capitalize()} OTP response: {r.text}")
@@ -260,37 +233,26 @@ def do_snappfood_login(phone_number, otp_code, chat_id):
         return f"❌ An error occurred during Snappfood login.", None
 
 def do_okala_login(phone_number, otp_code, chat_id):
+    """
+    MODIFIED: Now saves cookies along with tokens for Okala.
+    """
     try:
         with CurlSession(impersonate="chrome120") as s:
             service_key = "okala"
             s.headers.update(SITE_CONFIGS[service_key].get("headers", {}))
-            s.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
-            payload = {
-                "mobile_number": phone_number,
-                "otp_code": otp_code,
-                "grant_type": "customer_grant_type",
-                "client_id": "customer_client_id",
-                "client_secret": "u_M{'57j!%LI21#",
-                "device_type_code": 10
-            }
-            r = s.post(SITE_CONFIGS[service_key]["login_url"], data=payload)
+            payload = {"mobile": phone_number, "code": otp_code}
+            r = s.post(SITE_CONFIGS[service_key]["login_url"], json=payload)
             r.raise_for_status()
             data = r.json()
             if access_token := data.get("access_token"):
-                # *** MODIFIED: Save AlternativeId as cerberusId ***
-                cerberus_id = data.get("UserInfo", {}).get("AlternativeId")
-                token_info = {
-                    "token_type": "Bearer", 
-                    "access_token": access_token, 
-                    "refresh_token": data.get("refresh_token"),
-                    "cerberusId": cerberus_id
-                }
+                token_info = {"token_type": "bearer", "access_token": access_token, "refresh_token": data.get("refresh_token")}
                 
+                # *** NEW: Combine tokens and cookies into one data object ***
                 account_data = {"token_info": token_info, "cookies": dict(s.cookies)}
                 account_id = save_account_to_db(chat_id, service_key, phone_number, account_data)
                 
                 message = f"✅ Okala session saved for {phone_number}.\n\nYour Unique Account ID is:\n`{account_id}`"
-                vouchers_message = fetch_okala_vouchers(account_data, cerberus_id)
+                vouchers_message = fetch_okala_vouchers(account_data, phone_number, chat_id)
                 return message + vouchers_message, account_id
             else:
                 logging.error(f"Okala login failed. Response: {r.text}")
@@ -300,17 +262,19 @@ def do_okala_login(phone_number, otp_code, chat_id):
         return f"❌ An error occurred during Okala login.", None
 
 @retry_on_429()
-def fetch_okala_vouchers(account_data, cerberus_id):
+def fetch_okala_vouchers(account_data, phone_number=None, chat_id=None):
+    """
+    MODIFIED: Now expects account_data object instead of just token_info.
+    """
     token_info = account_data.get("token_info", {})
     access_token = token_info.get("access_token")
-    if not access_token or not cerberus_id: return "\n\n⚠️ Invalid session data for Okala."
+    if not access_token: return "\n\n⚠️ Invalid or missing token for Okala."
     
     config = SITE_CONFIGS["okala"]
-    voucher_url = f"{config['discounts_url']}/{cerberus_id}"
     headers = {**config["headers"], "Authorization": f"Bearer {access_token}"}
     
     def get_vouchers(session, auth_headers):
-        response = session.get(voucher_url, headers=auth_headers)
+        response = session.get(config["discounts_url"], headers=auth_headers)
         response.raise_for_status()
         data = response.json()
         vouchers = data.get("data", [])
@@ -321,10 +285,10 @@ def fetch_okala_vouchers(account_data, cerberus_id):
         return result
     try:
         with CurlSession(impersonate="chrome120") as s:
-            s.cookies.update(account_data.get("cookies", {}))
+            s.cookies.update(account_data.get("cookies", {})) # Use saved cookies
             return get_vouchers(s, headers)
     except Exception as e:
-        if hasattr(e, 'response') and e.response.status_code == 401:
+        if hasattr(e, 'response') and e.response.status_code == 401 and phone_number and chat_id:
             return "\n\n⚠️ Okala token may have expired. Please add the account again."
         else:
             raise e
@@ -561,8 +525,7 @@ async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE, ser
             if service == "Snappfood":
                 full_message += fetch_snappfood_vouchers(session_data)
             elif service == "Okala":
-                cerberus_id = session_data.get("token_info", {}).get("cerberusId")
-                full_message += fetch_okala_vouchers(session_data, cerberus_id)
+                full_message += fetch_okala_vouchers(session_data, phone_number, chat_id)
             elif service == "Tapsi":
                 cookies_dict = {c["name"]: c["value"] for c in session_data}
                 access_token = cookies_dict.get("accessToken")
