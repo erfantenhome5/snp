@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Session Loader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-md mx-auto bg-white rounded-2xl shadow-lg p-8">
+        
+        <div class="text-center mb-6">
+            <h1 class="text-3xl font-bold text-gray-900">Session Loader</h1>
+            <p class="text-gray-500 mt-2">Enter your session ID to log in.</p>
+        </div>
+
+        <!-- The form now posts to our proxy backend -->
+        <form action="/load_session" method="POST" class="space-y-6">
+            <div>
+                <label for="session_id" class="sr-only">Session ID</label>
+                <input type="text" id="session_id" name="session_id" required
+                       class="w-full px-4 py-3 bg-gray-50 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+                       placeholder="Enter your unique session ID">
+            </div>
+            <button type="submit"
+                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center transition-all duration-300">
+                Load Session
+            </button>
+        </form>
+    </div>
+
+</body>
+</html>
