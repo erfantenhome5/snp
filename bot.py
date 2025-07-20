@@ -28,7 +28,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.common.exceptions import TimeoutException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
+# We no longer need ChromeDriverManager
+# from webdriver_manager.chrome import ChromeDriverManager
 
 # --- Configuration ---
 logging.basicConfig(
@@ -41,6 +42,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 ADMIN_CHAT_ID = os.environ.get("ADMIN_CHAT_ID")
 BOT_PASSWORD = os.environ.get("BOT_PASSWORD") # Add a password for the bot
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") # Add your Gemini API Key
+
+# --- NEW: Path to your manually downloaded chromedriver ---
+# Set this environment variable or place chromedriver in the same directory as the bot.
+CHROMEDRIVER_PATH = os.environ.get("CHROMEDRIVER_PATH", "./chromedriver")
+
 
 # --- Sentry Initialization ---
 if SENTRY_DSN:
@@ -643,7 +649,19 @@ async def handle_phone_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         driver = None
         try:
-            service_obj = Service(ChromeDriverManager().install())
+            # --- MODIFIED SECTION ---
+            # Check if the chromedriver file exists and is executable
+            if not os.path.isfile(CHROMEDRIVER_PATH):
+                 await update.message.reply_text(f"❌ ChromeDriver not found at path: {CHROMEDRIVER_PATH}")
+                 return ConversationHandler.END
+            if not os.access(CHROMEDRIVER_PATH, os.X_OK):
+                 await update.message.reply_text(f"❌ ChromeDriver at {CHROMEDRIVER_PATH} is not executable. Please run: chmod +x {CHROMEDRIVER_PATH}")
+                 return ConversationHandler.END
+
+            # Use the specified path instead of downloading
+            service_obj = Service(executable_path=CHROMEDRIVER_PATH)
+            # --- END MODIFIED SECTION ---
+            
             driver = webdriver.Chrome(service=service_obj, options=chrome_options)
             wait = WebDriverWait(driver, 40)
             driver.get(SITE_CONFIGS["tapsi"]["login_page"])
