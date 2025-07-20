@@ -71,7 +71,8 @@ def proxy_request(path):
     # Get session data for every request using the stored ID
     session_data = get_session_from_bot_api(session.get('session_id'))
     if not session_data:
-        return "Your session has expired or is invalid.", 400
+        session.clear() # Clear the invalid session
+        return redirect(url_for('index'))
 
     # Handle different cookie structures (dict vs. list)
     raw_session_object = session_data.get('session', {})
@@ -98,9 +99,8 @@ def proxy_request(path):
 
     # Forward the request with the original method, headers, data, and cookies
     try:
-        # Copy essential headers from the incoming request
-        headers = {key: value for (key, value) in request.headers if key.lower() != 'host'}
-        headers['Referer'] = base_url # Set a valid referer
+        headers = {key: value for (key, value) in request.headers if key.lower() not in ['host', 'cookie']}
+        headers['Referer'] = base_url
 
         proxied_response = requests.request(
             method=request.method,
@@ -108,15 +108,35 @@ def proxy_request(path):
             headers=headers,
             data=request.get_data(),
             cookies=cookies_for_request,
-            allow_redirects=False, # We will handle redirects ourselves
+            allow_redirects=False,
             timeout=15
         )
         
-        # Exclude certain headers from the response that can cause issues
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
-        response_headers = [(name, value) for (name, value) in proxied_response.raw.headers.items() if name.lower() not in excluded_headers]
+        # --- NEW: Handle redirects and rewrite content ---
+        
+        # If the target site redirects, rewrite the Location header to keep the user on our proxy
+        if proxied_response.status_code in [301, 302, 303, 307, 308]:
+            location = proxied_response.headers.get('Location')
+            if location:
+                rewritten_location = location.replace(base_url, '')
+                return redirect(rewritten_location, code=proxied_response.status_code)
+            
+        content = proxied_response.content
+        content_type = proxied_response.headers.get('Content-Type', '')
 
-        return Response(proxied_response.content, proxied_response.status_code, response_headers)
+        # Rewrite URLs in text-based content to be relative, so they point back to our proxy
+        if any(t in content_type for t in ['text/html', 'text/css', 'application/javascript']):
+            try:
+                modified_text = content.decode('utf-8').replace(base_url, '')
+                content = modified_text.encode('utf-8')
+            except UnicodeDecodeError:
+                # If decoding fails, just pass the content as is
+                pass
+
+        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        response_headers = [(name, value) for (name, value) in proxied_response.headers.items() if name.lower() not in excluded_headers]
+
+        return Response(content, proxied_response.status_code, response_headers)
 
     except requests.RequestException as e:
         return f"Failed to connect to the target service: {e}", 502
