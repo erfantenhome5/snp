@@ -156,13 +156,11 @@ def retry_on_429(max_retries=3, delay=2.0):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
-                    # Check if the exception is a curl_cffi HTTPError with status 429
                     is_rate_limit_error = hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429
                     if is_rate_limit_error:
                         logging.warning(f"Rate limit hit (429) on attempt {attempt + 1}/{max_retries} for {func.__name__}. Retrying in {delay}s...")
                         time.sleep(delay)
                     else:
-                        # Re-raise exceptions that are not for rate limiting
                         raise e
             raise Exception(f"Function {func.__name__} failed after {max_retries} retries due to rate limiting.")
         return wrapper
@@ -195,7 +193,6 @@ def do_otp_request(phone_number, service):
         return False, error_message
 
 def save_account_to_db(user_id, service, phone_number, session_data):
-    """Saves a new account or updates an existing one in the database."""
     account_id = str(uuid.uuid4())
     session_json = json.dumps(session_data)
     with sqlite3.connect(DB_FILE) as conn:
@@ -236,6 +233,9 @@ def do_snappfood_login(phone_number, otp_code, chat_id):
         return f"❌ An error occurred during Snappfood login.", None
 
 def do_okala_login(phone_number, otp_code, chat_id):
+    """
+    MODIFIED: Now saves cookies along with tokens for Okala.
+    """
     try:
         with CurlSession(impersonate="chrome120") as s:
             service_key = "okala"
@@ -246,10 +246,13 @@ def do_okala_login(phone_number, otp_code, chat_id):
             data = r.json()
             if access_token := data.get("access_token"):
                 token_info = {"token_type": "bearer", "access_token": access_token, "refresh_token": data.get("refresh_token")}
-                account_id = save_account_to_db(chat_id, service_key, phone_number, token_info)
+                
+                # *** NEW: Combine tokens and cookies into one data object ***
+                account_data = {"token_info": token_info, "cookies": dict(s.cookies)}
+                account_id = save_account_to_db(chat_id, service_key, phone_number, account_data)
                 
                 message = f"✅ Okala session saved for {phone_number}.\n\nYour Unique Account ID is:\n`{account_id}`"
-                vouchers_message = fetch_okala_vouchers(token_info, phone_number, chat_id)
+                vouchers_message = fetch_okala_vouchers(account_data, phone_number, chat_id)
                 return message + vouchers_message, account_id
             else:
                 logging.error(f"Okala login failed. Response: {r.text}")
@@ -259,11 +262,17 @@ def do_okala_login(phone_number, otp_code, chat_id):
         return f"❌ An error occurred during Okala login.", None
 
 @retry_on_429()
-def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
+def fetch_okala_vouchers(account_data, phone_number=None, chat_id=None):
+    """
+    MODIFIED: Now expects account_data object instead of just token_info.
+    """
+    token_info = account_data.get("token_info", {})
     access_token = token_info.get("access_token")
     if not access_token: return "\n\n⚠️ Invalid or missing token for Okala."
+    
     config = SITE_CONFIGS["okala"]
     headers = {**config["headers"], "Authorization": f"Bearer {access_token}"}
+    
     def get_vouchers(session, auth_headers):
         response = session.get(config["discounts_url"], headers=auth_headers)
         response.raise_for_status()
@@ -276,6 +285,7 @@ def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
         return result
     try:
         with CurlSession(impersonate="chrome120") as s:
+            s.cookies.update(account_data.get("cookies", {})) # Use saved cookies
             return get_vouchers(s, headers)
     except Exception as e:
         if hasattr(e, 'response') and e.response.status_code == 401 and phone_number and chat_id:
@@ -527,7 +537,7 @@ async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE, ser
             full_message += f"\n❌ An error occurred: {e}"
             sentry_sdk.capture_exception(e)
         
-        time.sleep(1.5) # *** Increased delay to 1.5 seconds ***
+        time.sleep(1.5)
 
     await update.message.reply_text(full_message, parse_mode="Markdown")
     del USER_STATE[chat_id]
@@ -556,7 +566,7 @@ async def download_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE, 
 
     zip_path_base = os.path.join(BASE_DATA_DIR, str(chat_id), f"{service.lower()}_sessions_backup")
     shutil.make_archive(zip_path_base, "zip", temp_dir)
-    shutil.rmtree(temp_dir) # Clean up temp directory
+    shutil.rmtree(temp_dir)
     zip_path = f"{zip_path_base}.zip"
 
     await update.message.reply_text(f"Sending a zip file with all your saved {service} sessions...")
@@ -666,7 +676,6 @@ async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @admin_only
 async def migrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to migrate old JSON data to the SQLite database."""
     await update.message.reply_text("Starting migration from JSON files to SQLite DB...")
 
     with sqlite3.connect(DB_FILE) as conn:
@@ -759,7 +768,7 @@ def main():
     application.add_handler(CommandHandler("approve", approve_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("gemini", gemini_command))
-    application.add_handler(CommandHandler("migrate", migrate_command)) # New handler
+    application.add_handler(CommandHandler("migrate", migrate_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_universal_text))
 
     logging.info("Bot is starting with DB and new command-based flow...")
