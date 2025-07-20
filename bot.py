@@ -113,15 +113,21 @@ SITE_CONFIGS = {
     "snappfood": {"name": "Snappfood", "otp_url": "https://snappfood.ir/mobile/v4/user/loginMobileWithNoPass", "login_url": "https://snappfood.ir/mobile/v2/user/loginMobileWithToken", "discounts_url": "https://snappfood.ir/mobile/v2/user/activeVouchers", "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
     "okala": {
         "name": "Okala",
-        # *** MODIFIED URLS BASED ON POSTMAN DATA ***
         "otp_url": "https://apigateway.okala.com/api/voyager/C/CustomerAccount/OTPRegister",
         "login_url": "https://apigateway.okala.com/api/v1/accounts/tokens",
-        "discounts_url": "https://apigateway.okala.com/api/discount/v1/discounts/customer", # This might need adjustment later
-        "headers": {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36", "Accept": "application/json, text/plain, */*", "Origin": "https://www.okala.com", "Referer": "https://www.okala.com/"}
+        "discounts_url": "https://apigateway.okala.com/api/discount/v1/discounts/customer",
+        "headers": {
+            "Accept": "application/json, text/plain, */*",
+            "Origin": "https://www.okala.com",
+            "Referer": "https://www.okala.com/",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
+            "source": "okala",
+            "ui-version": "2.0"
+        }
     },
     "tapsi": {"name": "Tapsi", "login_page": "https://accounts.tapsi.ir/login?client_id=tapsi.cab.passenger&redirect_uri=https%3A%2F%2Fapp.tapsi.cab&response_type=code&scope=PASSENGER&state=be452b2200ac4ce5811b2add151cb007&code_challenge=CAajCXZFhHghxOtE9aIDvj5OmzYOsAumA-MO_5DtpOM&code_challenge_method=S256&response_mode=query", "rewards_url": "https://api.tapsi.cab/api/v2/reward/userReward"},
 }
-BASE_DATA_DIR = "user_data" # Still used for temporary files like zips
+BASE_DATA_DIR = "user_data"
 active_tapsi_sessions = {}
 SESSION_TIMEOUT = timedelta(minutes=5)
 
@@ -186,7 +192,12 @@ def do_otp_request(phone_number, service):
                 payload = {"cellphone": phone_number}
                 r = s.post(config["otp_url"], params=params, data=payload)
             elif service.lower() == "okala":
-                # *** MODIFIED: New payload for Okala OTP ***
+                # *** MODIFIED: Add extra headers and new payload for Okala OTP ***
+                s.headers.update({
+                    "Content-Type": "application/json",
+                    "X-Correlation-Id": str(uuid.uuid4()),
+                    "session-id": str(uuid.uuid4())
+                })
                 payload = {
                     "mobile": phone_number,
                     "confirmTerms": True,
@@ -252,28 +263,33 @@ def do_okala_login(phone_number, otp_code, chat_id):
     try:
         with CurlSession(impersonate="chrome120") as s:
             service_key = "okala"
-            # *** MODIFIED: Use x-www-form-urlencoded for login ***
+            s.headers.update(SITE_CONFIGS[service_key].get("headers", {}))
             s.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
             payload = {
                 "mobile_number": phone_number,
                 "otp_code": otp_code,
                 "grant_type": "customer_grant_type",
                 "client_id": "customer_client_id",
-                "client_secret": "u_M{'57j!%LI21#", # Secret from Postman
+                "client_secret": "u_M{'57j!%LI21#",
                 "device_type_code": 10
             }
             r = s.post(SITE_CONFIGS[service_key]["login_url"], data=payload)
             r.raise_for_status()
             data = r.json()
             if access_token := data.get("access_token"):
-                token_info = {"token_type": "Bearer", "access_token": access_token, "refresh_token": data.get("refresh_token")}
+                # *** MODIFIED: Save AlternativeId as cerberusId ***
+                cerberus_id = data.get("UserInfo", {}).get("AlternativeId")
+                token_info = {
+                    "token_type": "Bearer", 
+                    "access_token": access_token, 
+                    "refresh_token": data.get("refresh_token"),
+                    "cerberusId": cerberus_id
+                }
                 
                 account_data = {"token_info": token_info, "cookies": dict(s.cookies)}
                 account_id = save_account_to_db(chat_id, service_key, phone_number, account_data)
                 
                 message = f"✅ Okala session saved for {phone_number}.\n\nYour Unique Account ID is:\n`{account_id}`"
-                # Pass CerberusId for voucher fetching
-                cerberus_id = data.get("UserInfo", {}).get("AlternativeId")
                 vouchers_message = fetch_okala_vouchers(account_data, cerberus_id)
                 return message + vouchers_message, account_id
             else:
@@ -290,7 +306,6 @@ def fetch_okala_vouchers(account_data, cerberus_id):
     if not access_token or not cerberus_id: return "\n\n⚠️ Invalid session data for Okala."
     
     config = SITE_CONFIGS["okala"]
-    # *** MODIFIED: Voucher URL needs the user's alternative ID ***
     voucher_url = f"{config['discounts_url']}/{cerberus_id}"
     headers = {**config["headers"], "Authorization": f"Bearer {access_token}"}
     
@@ -546,8 +561,7 @@ async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE, ser
             if service == "Snappfood":
                 full_message += fetch_snappfood_vouchers(session_data)
             elif service == "Okala":
-                # For Okala, we need the cerberusId which is part of the token info
-                cerberus_id = session_data.get("token_info", {}).get("cerberusId") # This might not exist in old data
+                cerberus_id = session_data.get("token_info", {}).get("cerberusId")
                 full_message += fetch_okala_vouchers(session_data, cerberus_id)
             elif service == "Tapsi":
                 cookies_dict = {c["name"]: c["value"] for c in session_data}
@@ -808,3 +822,16 @@ async def handle_universal_text(update: Update, context: ContextTypes.DEFAULT_TY
 
 if __name__ == "__main__":
     main()
+" code between  and  in the most up-to-date Canvas "Bot Script with Okala Cookie Saving" document above and am asking a query about/based on this code below.
+Instructions to follow:
+  * Don't output/edit the document if the query is Direct/Simple. For example, if the query asks for a simple explanation, output a direct answer.
+  * Make sure to **edit** the document if the query shows the intent of editing the document, in which case output the entire edited document, **not just that section or the edits**.
+    * Don't output the same document/empty document and say that you have edited it.
+    * Don't change unrelated code in the document.
+  * Don't output  and  in your final response.
+  * Any references like "this" or "selected code" refers to the code between  and  tags.
+  * Just acknowledge my request in the introduction.
+  * Make sure to refer to the document as "Canvas" in your response.
+
+(actual user query begins now)
+i want to remove all the code and start from scratch and use flask for the bot and webview for ui and lets make it simple as possi
