@@ -822,16 +822,3 @@ async def handle_universal_text(update: Update, context: ContextTypes.DEFAULT_TY
 
 if __name__ == "__main__":
     main()
-" code between  and  in the most up-to-date Canvas "Bot Script with Okala Cookie Saving" document above and am asking a query about/based on this code below.
-Instructions to follow:
-  * Don't output/edit the document if the query is Direct/Simple. For example, if the query asks for a simple explanation, output a direct answer.
-  * Make sure to **edit** the document if the query shows the intent of editing the document, in which case output the entire edited document, **not just that section or the edits**.
-    * Don't output the same document/empty document and say that you have edited it.
-    * Don't change unrelated code in the document.
-  * Don't output  and  in your final response.
-  * Any references like "this" or "selected code" refers to the code between  and  tags.
-  * Just acknowledge my request in the introduction.
-  * Make sure to refer to the document as "Canvas" in your response.
-
-(actual user query begins now)
-i want to remove all the code and start from scratch and use flask for the bot and webview for ui and lets make it simple as possi
