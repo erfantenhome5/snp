@@ -7,6 +7,7 @@ import shutil
 import zipfile
 import json
 import uuid
+import sqlite3
 from datetime import datetime, timedelta
 
 # Telegram and automation libraries
@@ -43,80 +44,82 @@ CHROMEDRIVER_PATH = os.environ.get("CHROMEDRIVER_PATH", "./chromedriver")
 if SENTRY_DSN:
     sentry_sdk.init(dsn=SENTRY_DSN, traces_sample_rate=1.0)
 
-# --- UI Text & Buttons (New Reply Keyboard Layout) ---
+# --- UI Text & Buttons ---
 BTN_ADD_ACCOUNT = "➕ Add Account"
 BTN_LIST_ACCOUNTS = "📋 List Accounts"
 BTN_CHECK_VOUCHERS = "🔄 Check Vouchers"
 BTN_DOWNLOAD_SESSIONS = "💾 Download Sessions"
 VALID_SERVICES = ["Snappfood", "Tapsi", "Okala"]
 
+# --- Database Setup ---
+DB_FILE = "accounts.db"
+
+def init_db():
+    """Initializes the SQLite database and creates the necessary tables."""
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        # Main table for accounts
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS accounts (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                service TEXT NOT NULL,
+                phone_number TEXT NOT NULL,
+                session_data TEXT NOT NULL,
+                added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # Table for authorized users
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS authorized_users (
+                user_id INTEGER PRIMARY KEY
+            )
+        ''')
+        conn.commit()
+
 # --- User Authorization ---
-AUTHORIZED_USERS_FILE = "authorized_users.json"
 AUTHORIZED_USERS = set()
 
 def load_authorized_users():
-    """Loads the set of authorized user IDs from a file."""
+    """Loads authorized user IDs from the database."""
     global AUTHORIZED_USERS
     try:
-        if os.path.exists(AUTHORIZED_USERS_FILE):
-            with open(AUTHORIZED_USERS_FILE, 'r') as f:
-                user_ids = json.load(f)
-                AUTHORIZED_USERS = set(map(int, user_ids)) # Ensure IDs are integers
-                logging.info(f"Loaded {len(AUTHORIZED_USERS)} authorized users.")
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT user_id FROM authorized_users")
+            users = cursor.fetchall()
+            AUTHORIZED_USERS = {user[0] for user in users}
+            logging.info(f"Loaded {len(AUTHORIZED_USERS)} authorized users from DB.")
     except Exception as e:
-        logging.error(f"Could not load authorized users file: {e}", exc_info=True)
+        logging.error(f"Could not load authorized users from DB: {e}", exc_info=True)
 
-def save_authorized_users():
-    """Saves the set of authorized user IDs to a file."""
+def add_authorized_user(user_id: int):
+    """Adds a user to the authorized list in the database."""
     try:
-        with open(AUTHORIZED_USERS_FILE, 'w') as f:
-            json.dump(list(AUTHORIZED_USERS), f, indent=4)
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("INSERT OR IGNORE INTO authorized_users (user_id) VALUES (?)", (user_id,))
+            conn.commit()
+            AUTHORIZED_USERS.add(user_id)
     except Exception as e:
-        logging.error(f"Could not save authorized users file: {e}", exc_info=True)
+        logging.error(f"Could not save authorized user {user_id} to DB: {e}", exc_info=True)
+
 
 # --- State tracking for multi-step operations ---
-USER_STATE = {} # e.g. {chat_id: {"action": "add_account", "service": "snappfood"}}
+USER_STATE = {}
 
 # --- Global Configs & State ---
 SITE_CONFIGS = {
-    "snappfood": {
-        "name": "Snappfood",
-        "otp_url": "https://snappfood.ir/mobile/v4/user/loginMobileWithNoPass",
-        "login_url": "https://snappfood.ir/mobile/v2/user/loginMobileWithToken",
-        "discounts_url": "https://snappfood.ir/mobile/v2/user/activeVouchers",
-        "headers": {"Content-Type": "application/x-www-form-urlencoded"},
-    },
-    "okala": {
-        "name": "Okala",
-        "otp_url": "https://www.okala.com/api/v3/user/otp",
-        "login_url": "https://www.okala.com/api/v3/user/token",
-        "refresh_url": "https://www.okala.com/api/v3/user/token",
-        "discounts_url": "https://www.okala.com/api/v3/user/vouchers",
-        "headers": {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Origin": "https://www.okala.com",
-            "Referer": "https://www.okala.com/",
-        },
-    },
-    "tapsi": {
-        "name": "Tapsi",
-        "login_page": "https://accounts.tapsi.ir/login?client_id=tapsi.cab.passenger&redirect_uri=https%3A%2F%2Fapp.tapsi.cab&response_type=code&scope=PASSENGER&state=be452b2200ac4ce5811b2add151cb007&code_challenge=CAajCXZFhHghxOtE9aIDvj5OmzYOsAumA-MO_5DtpOM&code_challenge_method=S256&response_mode=query",
-        "rewards_url": "https://api.tapsi.cab/api/v2/reward/userReward",
-    },
+    "snappfood": {"name": "Snappfood", "otp_url": "https://snappfood.ir/mobile/v4/user/loginMobileWithNoPass", "login_url": "https://snappfood.ir/mobile/v2/user/loginMobileWithToken", "discounts_url": "https://snappfood.ir/mobile/v2/user/activeVouchers", "headers": {"Content-Type": "application/x-www-form-urlencoded"}},
+    "okala": {"name": "Okala", "otp_url": "https://www.okala.com/api/v3/user/otp", "login_url": "https://www.okala.com/api/v3/user/token", "refresh_url": "https://www.okala.com/api/v3/user/token", "discounts_url": "https://www.okala.com/api/v3/user/vouchers", "headers": {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", "Accept": "application/json, text/plain, */*", "Origin": "https://www.okala.com", "Referer": "https://www.okala.com/"}},
+    "tapsi": {"name": "Tapsi", "login_page": "https://accounts.tapsi.ir/login?client_id=tapsi.cab.passenger&redirect_uri=https%3A%2F%2Fapp.tapsi.cab&response_type=code&scope=PASSENGER&state=be452b2200ac4ce5811b2add151cb007&code_challenge=CAajCXZFhHghxOtE9aIDvj5OmzYOsAumA-MO_5DtpOM&code_challenge_method=S256&response_mode=query", "rewards_url": "https://api.tapsi.cab/api/v2/reward/userReward"},
 }
-BASE_DATA_DIR = "user_data"
+BASE_DATA_DIR = "user_data" # Still used for temporary files like zips
 active_tapsi_sessions = {}
 SESSION_TIMEOUT = timedelta(minutes=5)
 
 
-# --- Helper & Path Functions ---
-def get_user_dir(chat_id, service):
-    path = os.path.join(BASE_DATA_DIR, str(chat_id), f"{service.lower()}_sessions")
-    os.makedirs(path, exist_ok=True)
-    return path
-
+# --- Helper Functions ---
 def format_phone_number(phone):
     return "0" + phone if not phone.startswith("0") else phone
 
@@ -133,7 +136,41 @@ def authorized(func):
             await update.message.reply_text("❌ You are not authorized to use this bot. Please use /start to request access.")
     return wrapper
 
-# --- Snappfood & Okala Logic (Largely unchanged, but with added delays) ---
+def admin_only(func):
+    @wraps(func)
+    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
+        chat_id = update.effective_chat.id
+        if ADMIN_CHAT_ID and str(chat_id) == ADMIN_CHAT_ID:
+            return await func(update, context, *args, **kwargs)
+        else:
+            await update.message.reply_text("❌ This command is for the admin only.")
+    return wrapper
+
+
+# --- Retry Decorator for Rate Limiting ---
+def retry_on_429(max_retries=3, delay=2.0):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            for attempt in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    # Check if the exception is a curl_cffi HTTPError with status 429
+                    is_rate_limit_error = hasattr(e, 'response') and hasattr(e.response, 'status_code') and e.response.status_code == 429
+                    if is_rate_limit_error:
+                        logging.warning(f"Rate limit hit (429) on attempt {attempt + 1}/{max_retries} for {func.__name__}. Retrying in {delay}s...")
+                        time.sleep(delay)
+                    else:
+                        # Re-raise exceptions that are not for rate limiting
+                        raise e
+            raise Exception(f"Function {func.__name__} failed after {max_retries} retries due to rate limiting.")
+        return wrapper
+    return decorator
+
+
+# --- Logic with Retry Mechanism ---
+@retry_on_429()
 def do_otp_request(phone_number, service):
     config = SITE_CONFIGS[service.lower()]
     try:
@@ -157,10 +194,22 @@ def do_otp_request(phone_number, service):
         sentry_sdk.capture_exception(e)
         return False, error_message
 
+def save_account_to_db(user_id, service, phone_number, session_data):
+    """Saves a new account or updates an existing one in the database."""
+    account_id = str(uuid.uuid4())
+    session_json = json.dumps(session_data)
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO accounts (id, user_id, service, phone_number, session_data) VALUES (?, ?, ?, ?, ?)",
+            (account_id, user_id, service.lower(), phone_number, session_json)
+        )
+        conn.commit()
+    return account_id
+
 def do_snappfood_login(phone_number, otp_code, chat_id):
     try:
         with CurlSession(impersonate="chrome120") as session:
-            # ... (rest of the function is the same, just ensure service name is lowercased for config lookup)
             service_key = "snappfood"
             base_headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             session.headers.update({**base_headers, **SITE_CONFIGS[service_key].get("headers", {})})
@@ -173,20 +222,18 @@ def do_snappfood_login(phone_number, otp_code, chat_id):
             token = token_data.get("oauth2_token", {}).get("access_token")
             token_type = "bearer" if token else "nested"
             if not token: token = token_data.get("nested_jwt")
-            if not token: return "❌ CRITICAL: Could not find token in login response."
-            token_info = {"token": token, "token_type": token_type}
-            cookies = dict(session.cookies)
-            account_data = {"token_info": token_info, "cookies": cookies}
-            sessions_dir = get_user_dir(chat_id, service_key)
-            with open(os.path.join(sessions_dir, f"{phone_number}_session.json"), "w") as f:
-                json.dump(account_data, f)
-            message = f"✅ Snappfood session saved for {phone_number}."
+            if not token: return "❌ CRITICAL: Could not find token in login response.", None
+            
+            account_data = {"token_info": {"token": token, "token_type": token_type}, "cookies": dict(session.cookies)}
+            account_id = save_account_to_db(chat_id, service_key, phone_number, account_data)
+            
+            message = f"✅ Snappfood session saved for {phone_number}.\n\nYour Unique Account ID is:\n`{account_id}`"
             vouchers_message = fetch_snappfood_vouchers(account_data)
-            return message + vouchers_message
+            return message + vouchers_message, account_id
     except Exception as e:
         logging.error(f"Error during Snappfood login for {phone_number}: {e}")
         sentry_sdk.capture_exception(e)
-        return f"❌ An error occurred during Snappfood login."
+        return f"❌ An error occurred during Snappfood login.", None
 
 def do_okala_login(phone_number, otp_code, chat_id):
     try:
@@ -199,44 +246,19 @@ def do_okala_login(phone_number, otp_code, chat_id):
             data = r.json()
             if access_token := data.get("access_token"):
                 token_info = {"token_type": "bearer", "access_token": access_token, "refresh_token": data.get("refresh_token")}
-                sessions_dir = get_user_dir(chat_id, service_key)
-                with open(os.path.join(sessions_dir, f"{phone_number}_tokens.json"), "w") as f:
-                    json.dump(token_info, f)
-                message = f"✅ Okala session saved for {phone_number}."
+                account_id = save_account_to_db(chat_id, service_key, phone_number, token_info)
+                
+                message = f"✅ Okala session saved for {phone_number}.\n\nYour Unique Account ID is:\n`{account_id}`"
                 vouchers_message = fetch_okala_vouchers(token_info, phone_number, chat_id)
-                return message + vouchers_message
+                return message + vouchers_message, account_id
             else:
                 logging.error(f"Okala login failed. Response: {r.text}")
-                return "❌ CRITICAL: Could not find token in Okala login response."
+                return "❌ CRITICAL: Could not find token in Okala login response.", None
     except Exception as e:
         logging.error(f"Error during Okala login for {phone_number}: {e}")
-        return f"❌ An error occurred during Okala login."
+        return f"❌ An error occurred during Okala login.", None
 
-# --- Token Refresh and Voucher Fetching Logic ---
-def refresh_okala_token(token_info, phone_number, chat_id):
-    refresh_token = token_info.get("refresh_token")
-    if not refresh_token: return None, "❌ No refresh token available. Please log in again."
-    config = SITE_CONFIGS["okala"]
-    payload = {"refresh_token": refresh_token, "grant_type": "refresh_token"}
-    try:
-        with CurlSession(impersonate="chrome120") as s:
-            s.headers.update(config.get("headers", {}))
-            response = s.post(config["refresh_url"], json=payload)
-            response.raise_for_status()
-            data = response.json()
-            new_access_token = data.get("access_token")
-            if not new_access_token: return None, "❌ Refresh failed: No new access token in response."
-            token_info["access_token"] = new_access_token
-            token_info["refresh_token"] = data.get("refresh_token", refresh_token)
-            sessions_dir = get_user_dir(chat_id, "okala")
-            with open(os.path.join(sessions_dir, f"{phone_number}_tokens.json"), "w") as f:
-                json.dump(token_info, f)
-            return token_info, "✅ Token refreshed successfully."
-    except Exception as e:
-        logging.error(f"Okala token refresh failed for {phone_number}: {e}")
-        sentry_sdk.capture_exception(e)
-        return None, f"❌ Token refresh failed. Please log in again."
-
+@retry_on_429()
 def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
     access_token = token_info.get("access_token")
     if not access_token: return "\n\n⚠️ Invalid or missing token for Okala."
@@ -257,21 +279,11 @@ def fetch_okala_vouchers(token_info, phone_number=None, chat_id=None):
             return get_vouchers(s, headers)
     except Exception as e:
         if hasattr(e, 'response') and e.response.status_code == 401 and phone_number and chat_id:
-            logging.info(f"Okala token expired for {phone_number}. Attempting refresh.")
-            new_token_info, refresh_message = refresh_okala_token(token_info, phone_number, chat_id)
-            if new_token_info:
-                try:
-                    with CurlSession(impersonate="chrome120") as s_retry:
-                        new_headers = {**config["headers"], "Authorization": f"Bearer {new_token_info['access_token']}"}
-                        return f"{refresh_message}{get_vouchers(s_retry, new_headers)}"
-                except Exception as retry_e:
-                    return f"{refresh_message}\n\n⚠️ Failed to fetch vouchers after refresh: {retry_e}"
-            else:
-                return f"\n\n{refresh_message}"
+            return "\n\n⚠️ Okala token may have expired. Please add the account again."
         else:
-            logging.error(f"Failed to fetch Okala vouchers: {e}")
-            return f"\n\n⚠️ Could not fetch Okala vouchers. Error: {e}"
+            raise e
 
+@retry_on_429()
 def fetch_snappfood_vouchers(account_data):
     token_info = account_data.get("token_info", {})
     token, token_type = token_info.get("token"), token_info.get("token_type")
@@ -293,9 +305,9 @@ def fetch_snappfood_vouchers(account_data):
                 result += f"  - **{v.get('title', 'N/A')}**\n    Code: `{v.get('customer_code', 'N/A')}`\n    Expires: {v.get('expired_at', 'N/A')}\n"
             return result
     except Exception as e:
-        logging.error(f"Failed to fetch Snappfood vouchers: {e}")
-        return f"\n\n⚠️ Could not fetch Snappfood vouchers. Error: {e}"
+        raise e
 
+@retry_on_429()
 def fetch_tapsi_rewards(access_token, cookies):
     config = SITE_CONFIGS["tapsi"]
     headers = {"Authorization": f"Bearer {access_token}", "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36"}
@@ -312,10 +324,9 @@ def fetch_tapsi_rewards(access_token, cookies):
             result += f"  - **{r.get('title')}**\n    {r.get('description')}\n    Expires: {r.get('expiredAt')}\n"
         return result
     except Exception as e:
-        logging.error(f"Failed to fetch Tapsi rewards: {e}")
-        return f"\n\n⚠️ Could not fetch Tapsi rewards. Error: {e}"
+        raise e
 
-# --- Gemini API Logic (Unchanged) ---
+# --- Gemini API Logic ---
 def call_gemini_api(prompt: str) -> str:
     if not GEMINI_API_KEY: return "❌ Gemini API key is not configured."
     api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
@@ -334,11 +345,9 @@ def call_gemini_api(prompt: str) -> str:
 
 # --- Telegram Command Handlers ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles the /start command and password-based authorization."""
     chat_id = update.effective_chat.id
     if ADMIN_CHAT_ID and str(chat_id) == ADMIN_CHAT_ID and chat_id not in AUTHORIZED_USERS:
-        AUTHORIZED_USERS.add(chat_id)
-        save_authorized_users()
+        add_authorized_user(chat_id)
         logging.info(f"Admin user {chat_id} auto-authorized.")
 
     if chat_id in AUTHORIZED_USERS:
@@ -355,21 +364,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 async def handle_password_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles password submission for authorization."""
     chat_id = update.effective_chat.id
     password = update.message.text
     user = update.message.from_user
 
-    if not BOT_PASSWORD:
-        await update.message.reply_text("Bot password is not set. Access is disabled.")
-        return
-
     if password == BOT_PASSWORD:
-        if not ADMIN_CHAT_ID:
-            await update.message.reply_text("Admin not configured. Access cannot be granted.")
-            return
-
-        # Send approval request to admin
         await context.bot.send_message(
             chat_id=ADMIN_CHAT_ID,
             text=f"New access request from: {user.full_name} (@{user.username or 'N/A'})\n"
@@ -377,39 +376,27 @@ async def handle_password_submission(update: Update, context: ContextTypes.DEFAU
         )
         await update.message.reply_text("✅ Your access request has been sent to the admin for approval.")
     else:
-        await update.message.reply_text("❌ Incorrect password. Please try again.")
+        await update.message.reply_text("❌ Incorrect password.")
     
     if chat_id in USER_STATE:
         del USER_STATE[chat_id]
 
+@admin_only
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin command to approve a user."""
-    admin_id = update.effective_chat.id
-    if not ADMIN_CHAT_ID or str(admin_id) != ADMIN_CHAT_ID:
-        await update.message.reply_text("❌ This command is for the admin only.")
-        return
-    
     try:
         user_id_to_approve = int(context.args[0])
-        AUTHORIZED_USERS.add(user_id_to_approve)
-        save_authorized_users()
-        await context.bot.send_message(
-            chat_id=user_id_to_approve,
-            text="🎉 Your access has been approved! Use /start to begin."
-        )
+        add_authorized_user(user_id_to_approve)
+        await context.bot.send_message(chat_id=user_id_to_approve, text="🎉 Your access has been approved! Use /start to begin.")
         await update.message.reply_text(f"✅ User {user_id_to_approve} has been authorized.")
-        logging.info(f"Admin approved access for user {user_id_to_approve}")
     except (IndexError, ValueError):
         await update.message.reply_text("Usage: /approve <USER_ID>")
 
 # --- Main Logic Handler ---
 @authorized
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles all incoming messages from authorized users."""
     chat_id = update.effective_chat.id
     text = update.message.text
 
-    # Check if user is in a multi-step process
     if chat_id in USER_STATE:
         state = USER_STATE[chat_id]
         action = state.get("action")
@@ -417,15 +404,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "awaiting_service":
             if text in VALID_SERVICES:
                 USER_STATE[chat_id]["service"] = text
-                if state.get("next_action") == "add_account":
+                next_action = state.get("next_action")
+                if next_action == "add_account":
                     USER_STATE[chat_id]["action"] = "awaiting_phone"
                     await update.message.reply_text(f"Selected {text}. Please enter the phone number.", reply_markup=ReplyKeyboardRemove())
-                elif state.get("next_action") == "list_accounts":
-                    await list_accounts(update, context, text)
-                elif state.get("next_action") == "check_vouchers":
-                    await check_vouchers(update, context, text)
-                elif state.get("next_action") == "download_sessions":
-                    await download_sessions(update, context, text)
+                elif next_action == "list_accounts": await list_accounts(update, context, text)
+                elif next_action == "check_vouchers": await check_vouchers(update, context, text)
+                elif next_action == "download_sessions": await download_sessions(update, context, text)
             else:
                 await update.message.reply_text("Invalid service. Please select one from the keyboard.")
             return
@@ -434,18 +419,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone = format_phone_number(text)
             service = state["service"]
             USER_STATE[chat_id]["phone"] = phone
-            
             if service.lower() in ["snappfood", "okala"]:
-                await update.message.reply_text(f"Requesting OTP for {phone} on {service}...")
                 success, error_msg = do_otp_request(phone, service)
                 if success:
                     USER_STATE[chat_id]["action"] = "awaiting_otp"
                     await update.message.reply_text("✅ OTP sent. Please reply with the code.")
                 else:
                     await update.message.reply_text(error_msg)
-                    del USER_STATE[chat_id] # End process
-                    await start_command(update, context) # Show main menu
-            
+                    del USER_STATE[chat_id]
+                    await start_command(update, context)
             elif service.lower() == "tapsi":
                 await handle_tapsi_phone_input(update, context, phone)
             return
@@ -456,86 +438,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             phone = state["phone"]
             await update.message.reply_text(f"Verifying OTP for {phone} on {service}...")
             
-            message = "An unknown error occurred."
-            if service.lower() == "snappfood":
-                message = do_snappfood_login(phone, otp, chat_id)
-            elif service.lower() == "okala":
-                message = do_okala_login(phone, otp, chat_id)
-            elif service.lower() == "tapsi":
-                message = await handle_tapsi_otp_input(update, context, otp)
+            message, account_id = "An unknown error occurred.", None
+            if service.lower() == "snappfood": message, account_id = do_snappfood_login(phone, otp, chat_id)
+            elif service.lower() == "okala": message, account_id = do_okala_login(phone, otp, chat_id)
+            elif service.lower() == "tapsi": message, account_id = await handle_tapsi_otp_input(update, context, otp)
             
             await update.message.reply_text(message, parse_mode="Markdown")
-            del USER_STATE[chat_id] # End process
-            await start_command(update, context) # Show main menu
+            del USER_STATE[chat_id]
+            await start_command(update, context)
             return
 
-    # Handle main menu buttons
     if text == BTN_ADD_ACCOUNT:
         USER_STATE[chat_id] = {"action": "awaiting_service", "next_action": "add_account"}
-        await ask_for_service(update, context, "What service do you want to add an account for?")
+        await ask_for_service(update, context, "What service do you want to add?")
     elif text == BTN_LIST_ACCOUNTS:
         USER_STATE[chat_id] = {"action": "awaiting_service", "next_action": "list_accounts"}
-        await ask_for_service(update, context, "What service do you want to list accounts for?")
+        await ask_for_service(update, context, "List accounts for which service?")
     elif text == BTN_CHECK_VOUCHERS:
         USER_STATE[chat_id] = {"action": "awaiting_service", "next_action": "check_vouchers"}
-        await ask_for_service(update, context, "What service do you want to check vouchers for?")
+        await ask_for_service(update, context, "Check vouchers for which service?")
     elif text == BTN_DOWNLOAD_SESSIONS:
         USER_STATE[chat_id] = {"action": "awaiting_service", "next_action": "download_sessions"}
-        await ask_for_service(update, context, "What service do you want to download sessions for?")
+        await ask_for_service(update, context, "Download sessions for which service?")
 
 async def ask_for_service(update: Update, context: ContextTypes.DEFAULT_TYPE, message: str):
-    """Sends a message asking the user to select a service."""
     reply_keyboard = [[s] for s in VALID_SERVICES]
     await update.message.reply_text(
         message,
         reply_markup=ReplyKeyboardMarkup(reply_keyboard, one_time_keyboard=True, resize_keyboard=True),
     )
 
-# --- Specific Action Handlers ---
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE, service: str):
     chat_id = update.effective_chat.id
-    sessions_dir = get_user_dir(chat_id, service)
-    ext = "_session.json" if service == "Snappfood" else "_cookies.json" if service == "Tapsi" else "_tokens.json"
-    accounts = [f.replace(ext, "") for f in os.listdir(sessions_dir) if f.endswith(ext)]
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT phone_number, id FROM accounts WHERE user_id = ? AND service = ?",
+            (chat_id, service.lower())
+        )
+        accounts = cursor.fetchall()
     
     if not accounts:
         message = f"No accounts saved for {service} yet."
     else:
-        message = f"Saved {service} Accounts:\n- " + "\n- ".join(sorted(accounts))
+        message = f"Saved {service} Accounts:\n"
+        for phone, acc_id in accounts:
+            message += f"- Phone: {phone}\n  ID: `{acc_id}`\n"
     
-    await update.message.reply_text(message)
+    await update.message.reply_text(message, parse_mode="Markdown")
     del USER_STATE[chat_id]
-    await start_command(update, context) # Show main menu
+    await start_command(update, context)
 
 async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE, service: str):
     chat_id = update.effective_chat.id
     await update.message.reply_text(f"🔄 Checking all saved accounts for {service}. This may take a moment...")
     
-    sessions_dir = get_user_dir(chat_id, service)
-    ext = "_session.json" if service == "Snappfood" else "_cookies.json" if service == "Tapsi" else "_tokens.json"
-    account_files = [f for f in os.listdir(sessions_dir) if f.endswith(ext)]
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT phone_number, session_data FROM accounts WHERE user_id = ? AND service = ?",
+            (chat_id, service.lower())
+        )
+        accounts = cursor.fetchall()
 
-    if not account_files:
+    if not accounts:
         await update.message.reply_text(f"No accounts found for {service} to check.")
         del USER_STATE[chat_id]
         await start_command(update, context)
         return
 
     full_message = f"--- 📜 Report for {service} Accounts ---\n"
-    for filename in sorted(account_files):
-        phone_number = filename.replace(ext, "")
-        file_path = os.path.join(sessions_dir, filename)
+    for phone_number, session_json in accounts:
         full_message += f"\n\n**Checking Account: `{phone_number}`**"
         try:
+            session_data = json.loads(session_json)
             if service == "Snappfood":
-                with open(file_path, "r") as f: account_data = json.load(f)
-                full_message += fetch_snappfood_vouchers(account_data)
+                full_message += fetch_snappfood_vouchers(session_data)
             elif service == "Okala":
-                with open(file_path, "r") as f: token_info = json.load(f)
-                full_message += fetch_okala_vouchers(token_info, phone_number, chat_id)
+                full_message += fetch_okala_vouchers(session_data, phone_number, chat_id)
             elif service == "Tapsi":
-                with open(file_path, "r") as f: cookies_list = json.load(f)
-                cookies_dict = {c["name"]: c["value"] for c in cookies_list}
+                cookies_dict = {c["name"]: c["value"] for c in session_data}
                 access_token = cookies_dict.get("accessToken")
                 if access_token:
                     full_message += fetch_tapsi_rewards(access_token, cookies_dict)
@@ -545,23 +527,36 @@ async def check_vouchers(update: Update, context: ContextTypes.DEFAULT_TYPE, ser
             full_message += f"\n❌ An error occurred: {e}"
             sentry_sdk.capture_exception(e)
         
-        time.sleep(1) # *** FIX for 429 Error: Wait 1 second between checks ***
+        time.sleep(1.5) # *** Increased delay to 1.5 seconds ***
 
     await update.message.reply_text(full_message, parse_mode="Markdown")
     del USER_STATE[chat_id]
-    await start_command(update, context) # Show main menu
+    await start_command(update, context)
 
 async def download_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE, service: str):
     chat_id = update.effective_chat.id
-    sessions_dir = get_user_dir(chat_id, service)
-    if not any(os.scandir(sessions_dir)):
+    
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, session_data FROM accounts WHERE user_id = ? AND service = ?", (chat_id, service.lower()))
+        accounts = cursor.fetchall()
+
+    if not accounts:
         await update.message.reply_text(f"No accounts saved for {service} yet.")
         del USER_STATE[chat_id]
         await start_command(update, context)
         return
 
+    temp_dir = os.path.join(BASE_DATA_DIR, str(chat_id), "temp_download")
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    for acc_id, session_json in accounts:
+        with open(os.path.join(temp_dir, f"{acc_id}.json"), "w") as f:
+            f.write(session_json)
+
     zip_path_base = os.path.join(BASE_DATA_DIR, str(chat_id), f"{service.lower()}_sessions_backup")
-    shutil.make_archive(zip_path_base, "zip", sessions_dir)
+    shutil.make_archive(zip_path_base, "zip", temp_dir)
+    shutil.rmtree(temp_dir) # Clean up temp directory
     zip_path = f"{zip_path_base}.zip"
 
     await update.message.reply_text(f"Sending a zip file with all your saved {service} sessions...")
@@ -613,33 +608,28 @@ async def handle_tapsi_otp_input(update: Update, context: ContextTypes.DEFAULT_T
     chat_id = update.effective_chat.id
     session_data = active_tapsi_sessions.get(chat_id)
     if not session_data:
-        return "❌ Your Tapsi session has expired. Please try again."
+        return "❌ Your Tapsi session has expired. Please try again.", None
     
     driver = session_data["driver"]
     phone = USER_STATE[chat_id]["phone"]
-    message = ""
+    message, account_id = "", None
     try:
         wait = WebDriverWait(driver, 15)
         otp_inputs = wait.until(EC.presence_of_all_elements_located((By.XPATH, "//div[starts-with(@id, 'INPUT_DIGIT_NUMBER_CONTAINER')]/input")))
-        if len(otp_inputs) >= 5 and len(otp_code) == 5:
-            for i in range(5):
-                otp_inputs[i].send_keys(otp_code[i])
-                time.sleep(0.1)
-        else:
-            raise Exception("Could not find the 5 separate OTP input boxes.")
+        for i in range(5):
+            otp_inputs[i].send_keys(otp_code[i])
+            time.sleep(0.1)
 
         wait.until(EC.element_to_be_clickable((By.XPATH, "//button[@type='button' and not(@disabled)]"))).click()
         wait.until(EC.visibility_of_element_located((By.XPATH, "//*[contains(text(), 'سرویس‌ها')]")))
 
-        sessions_dir = get_user_dir(chat_id, "tapsi")
-        cookie_file_path = os.path.join(sessions_dir, f"{phone}_cookies.json")
-        browser_cookies = {c["name"]: c["value"] for c in driver.get_cookies()}
-        access_token = browser_cookies.get("accessToken")
+        browser_cookies = driver.get_cookies()
+        access_token = next((c['value'] for c in browser_cookies if c['name'] == 'accessToken'), None)
 
         if access_token:
-            with open(cookie_file_path, "w") as f: json.dump(driver.get_cookies(), f)
-            message = f"✅ Tapsi session saved for {phone}!"
-            message += fetch_tapsi_rewards(access_token, browser_cookies)
+            account_id = save_account_to_db(chat_id, "tapsi", phone, browser_cookies)
+            message = f"✅ Tapsi session saved for {phone}!\n\nYour Unique Account ID is:\n`{account_id}`"
+            message += fetch_tapsi_rewards(access_token, {c["name"]: c["value"] for c in browser_cookies})
         else:
             message = "❌ Login successful, but could not find accessToken cookie."
     except Exception as e:
@@ -649,59 +639,138 @@ async def handle_tapsi_otp_input(update: Update, context: ContextTypes.DEFAULT_T
         driver.quit()
         if chat_id in active_tapsi_sessions:
             del active_tapsi_sessions[chat_id]
-    return message
+    return message, account_id
 
-# --- Admin Commands (Unchanged) ---
-@authorized
+# --- Admin Commands & Cleanup ---
+@admin_only
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (code is the same as before)
-    pass
+    message = (
+        "--- Admin Panel ---\n\n"
+        "**Available Admin Commands:**\n"
+        "- `/admin`: Shows this panel.\n"
+        "- `/approve <USER_ID>`: Authorizes a new user.\n"
+        "- `/gemini [prompt]`: Query the Gemini API.\n"
+        "- `/migrate`: Convert old JSON session files to the new SQLite DB. **Run only once!**"
+    )
+    await update.message.reply_text(message, parse_mode='Markdown')
 
-@authorized
+@admin_only
 async def gemini_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ... (code is the same as before)
-    pass
+    prompt = " ".join(context.args)
+    if not prompt:
+        await update.message.reply_text("Usage: `/gemini How does AI work?`")
+        return
+    await update.message.reply_text("🧠 Querying Gemini API, please wait...")
+    response_text = call_gemini_api(prompt)
+    await update.message.reply_text(response_text)
 
-# --- Cleanup Thread (Unchanged) ---
+@admin_only
+async def migrate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to migrate old JSON data to the SQLite database."""
+    await update.message.reply_text("Starting migration from JSON files to SQLite DB...")
+
+    with sqlite3.connect(DB_FILE) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM accounts")
+        count = cursor.fetchone()[0]
+        if count > 0:
+            await update.message.reply_text("❌ Migration failed: The 'accounts' table is not empty. Migration can only be run on a fresh database.")
+            return
+
+    migrated_count = 0
+    error_count = 0
+    old_data_dir = "user_data"
+
+    if not os.path.isdir(old_data_dir):
+        await update.message.reply_text("⚠️ No 'user_data' directory found to migrate from.")
+        return
+
+    for user_id_str in os.listdir(old_data_dir):
+        user_path = os.path.join(old_data_dir, user_id_str)
+        if not os.path.isdir(user_path):
+            continue
+        try:
+            user_id = int(user_id_str)
+            for service_dir_name in os.listdir(user_path):
+                service_path = os.path.join(user_path, service_dir_name)
+                if not os.path.isdir(service_path) or not service_dir_name.endswith("_sessions"):
+                    continue
+                
+                service = service_dir_name.replace("_sessions", "")
+                if service not in [s.lower() for s in VALID_SERVICES]:
+                    continue
+
+                for filename in os.listdir(service_path):
+                    if not filename.endswith(".json"):
+                        continue
+                    
+                    try:
+                        phone_number = filename.split("_")[0]
+                        file_path = os.path.join(service_path, filename)
+                        with open(file_path, 'r') as f:
+                            session_data = json.load(f)
+                        
+                        save_account_to_db(user_id, service, phone_number, session_data)
+                        migrated_count += 1
+                        logging.info(f"Migrated {service} account for user {user_id}, phone {phone_number}")
+                    except Exception as e:
+                        error_count += 1
+                        logging.error(f"Failed to migrate file {filename} for user {user_id}: {e}")
+
+        except (ValueError, TypeError):
+            logging.warning(f"Skipping non-integer directory name: {user_id_str}")
+            continue
+
+    report = f"✅ Migration Complete!\n\n- Successfully migrated accounts: {migrated_count}\n- Failed files: {error_count}"
+    await update.message.reply_text(report)
+
+
 def cleanup_old_sessions():
-    # ... (code is the same as before)
-    pass
+    while True:
+        try:
+            for chat_id in list(active_tapsi_sessions.keys()):
+                session_data = active_tapsi_sessions.get(chat_id)
+                if session_data and (datetime.now() - session_data["timestamp"]) > SESSION_TIMEOUT:
+                    logging.info(f"Cleaning up expired session for chat_id: {chat_id}")
+                    try:
+                        session_data["driver"].quit()
+                    except WebDriverException as e:
+                        logging.error(f"Error quitting expired driver for {chat_id}: {e}")
+                    active_tapsi_sessions.pop(chat_id, None)
+        except Exception as e:
+            logging.error(f"Error in cleanup thread: {e}")
+            sentry_sdk.capture_exception(e)
+        time.sleep(60)
 
 # --- Main Bot Function ---
 def main():
-    if not all([TELEGRAM_TOKEN, ADMIN_CHAT_ID, BOT_PASSWORD, GEMINI_API_KEY]):
-        logging.warning("One or more environment variables are not set. Bot may not function fully.")
-
+    init_db()
     load_authorized_users()
     
+    if not all([TELEGRAM_TOKEN, ADMIN_CHAT_ID, BOT_PASSWORD]):
+        logging.warning("One or more critical environment variables are not set.")
+
     cleanup_thread = threading.Thread(target=cleanup_old_sessions, daemon=True)
     cleanup_thread.start()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # Handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("approve", approve_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("gemini", gemini_command))
-    
-    # This handler will manage both password submission and all authorized actions
+    application.add_handler(CommandHandler("migrate", migrate_command)) # New handler
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_universal_text))
 
-    logging.info("Bot is starting with new command-based flow...")
+    logging.info("Bot is starting with DB and new command-based flow...")
     application.run_polling()
 
 async def handle_universal_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """A single handler to route text input based on user state."""
     chat_id = update.effective_chat.id
-    
-    # If user is awaiting password, process that first
     if USER_STATE.get(chat_id, {}).get("action") == "awaiting_password":
         await handle_password_submission(update, context)
-    # Otherwise, if user is authorized, let the main handler process their command
     elif chat_id in AUTHORIZED_USERS:
         await handle_message(update, context)
-    # If unauthorized and not in a state, just ignore or prompt to start
     else:
         await update.message.reply_text("Please use /start to begin.")
 
