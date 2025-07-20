@@ -48,7 +48,7 @@ def index():
 def load_session():
     """
     Takes the session_id, verifies it, stores it in the user's session,
-    and then redirects them to the proxied site's homepage.
+    and then directly serves the proxied homepage.
     """
     session_id = request.form.get('session_id')
     logging.info(f"Received request to load session for ID: {session_id[:8] if session_id else 'None'}")
@@ -62,10 +62,10 @@ def load_session():
     # Store the necessary info in the user's secure session cookie
     session['session_id'] = session_id
     session['service'] = session_data.get('service')
-    logging.info(f"Session for service '{session['service']}' created successfully. Redirecting...")
+    logging.info(f"Session for service '{session['service']}' created successfully. Now proxying homepage.")
     
-    # Redirect to the root of the proxy, which will be handled by the catch-all route.
-    return redirect('/?login=true')
+    # Instead of redirecting, directly call the proxy function for the homepage ('').
+    return proxy_request(path='')
 
 
 # --- The main catch-all proxy route ---
@@ -76,12 +76,13 @@ def proxy_request(path):
     This is the core of the proxy. It catches all requests, adds the login
     cookies, and forwards them to the target service.
     """
-    logging.info(f"--- New Proxy Request ---")
-    logging.info(f"Path requested: /{path}")
-
-    if 'session_id' not in session:
+    # This check is now only for direct access to paths other than the homepage
+    if 'session_id' not in session and path != '':
         logging.warning("No session_id found. Redirecting to index.")
         return redirect(url_for('index'))
+
+    logging.info(f"--- New Proxy Request ---")
+    logging.info(f"Path requested: /{path}")
 
     session_data = get_session_from_bot_api(session.get('session_id'))
     if not session_data:
