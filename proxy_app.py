@@ -26,9 +26,13 @@ def index():
     """Renders the main page with the input form."""
     # This function now uses a simple HTML string template.
     # See the frontend code in the next step.
-    with open('index.html', 'r') as f:
-        html_content = f.read()
-    return html_content
+    try:
+        with open('index.html', 'r') as f:
+            html_content = f.read()
+        return html_content
+    except FileNotFoundError:
+        return "Error: index.html not found. Make sure it's in the same directory as proxy_app.py", 500
+
 
 # --- The main proxy route ---
 @app.route('/load_session', methods=['POST'])
@@ -47,7 +51,20 @@ def load_session():
         return "Could not find a session with that ID. Please check the ID and make sure the bot API is running.", 404
 
     service = session_data.get('service')
-    cookies = session_data.get('session', {}).get('cookies', {})
+    
+    # --- FIX STARTS HERE ---
+    # Handle different session data structures (dict for Snappfood/Okala, list for Tapsi)
+    raw_session_object = session_data.get('session', {})
+    cookies_for_request = {}
+
+    if isinstance(raw_session_object, list):
+        # This is a Tapsi-style session (a list of cookie dictionaries)
+        # We convert it to the single dictionary that the 'requests' library needs.
+        cookies_for_request = {cookie['name']: cookie['value'] for cookie in raw_session_object}
+    elif isinstance(raw_session_object, dict):
+        # This is a Snappfood/Okala-style session (a dictionary containing a 'cookies' dictionary)
+        cookies_for_request = raw_session_object.get('cookies', {})
+    # --- FIX ENDS HERE ---
 
     # 2. Determine the target URL based on the service
     target_urls = {
@@ -69,7 +86,7 @@ def load_session():
         }
         
         # The 'requests' library uses a 'cookies' parameter which takes a dictionary
-        proxied_response = requests.get(target_url, headers=headers, cookies=cookies, timeout=10)
+        proxied_response = requests.get(target_url, headers=headers, cookies=cookies_for_request, timeout=10)
         
         # 4. Return the content from the target site to the user's browser
         # We create a Response object to pass along the content and status code.
